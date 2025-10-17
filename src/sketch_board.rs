@@ -69,7 +69,6 @@ pub enum TextEventMsg {
     Commit(String),
     Preedit {
         text: String,
-        attrs: Option<pango::AttrList>,
         cursor: Option<u32>,
     },
     PreeditEnd,
@@ -594,17 +593,12 @@ impl SketchBoard {
                         .emit(SketchBoardOutput::ToolSwitchShortcut(tool));
                 }
             }
-            TextEventMsg::Preedit {
-                text,
-                attrs,
-                cursor,
-            } => {
+            TextEventMsg::Preedit { text, cursor } => {
                 if self.active_tool_type() == Tools::Text
                     && self.active_tool.borrow().input_enabled()
                 {
                     sender.input(SketchBoardInput::new_text_event(TextEventMsg::Preedit {
                         text,
-                        attrs,
                         cursor,
                     }));
                 }
@@ -845,7 +839,7 @@ impl Component for SketchBoard {
         {
             let sender = sender.input_sender().clone();
             model.im_context.connect_preedit_changed(move |cx| {
-                let (text, attrs, cursor) = cx.preedit_string();
+                let (text, _, cursor) = cx.preedit_string();
                 let cursor = if cursor >= 0 {
                     Some(cursor as u32)
                 } else {
@@ -853,7 +847,6 @@ impl Component for SketchBoard {
                 };
                 sender.emit(SketchBoardInput::new_commit_event(TextEventMsg::Preedit {
                     text: text.to_string(),
-                    attrs: Some(attrs),
                     cursor,
                 }));
             });

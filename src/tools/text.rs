@@ -1,7 +1,5 @@
 use anyhow::Result;
 use femtovg::{FontId, Paint, Path};
-use glib::translate::FromGlib;
-use pango::{AttrColor, AttrInt, AttrList, AttrType, Underline};
 use relm4::gtk::prelude::IMContextExt;
 use relm4::gtk::{
     gdk::{Key, ModifierType, Rectangle},
@@ -36,13 +34,9 @@ struct Preedit {
     spans: Vec<PreeditSpan>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct PreeditSpan {
     range: Range<usize>,
-    foreground: Option<crate::style::Color>,
-    background: Option<crate::style::Color>,
-    underline: Option<Underline>,
-    underline_color: Option<crate::style::Color>,
 }
 
 struct DisplayContent<'a> {
@@ -220,18 +214,6 @@ impl Drawable for Text {
             lines: &line_layouts,
         };
 
-        if self.editing {
-            if let (Some(preedit), Some(preedit_range)) = (&self.preedit, &display.preedit_range) {
-                self.draw_preedit_background(
-                    canvas,
-                    &layout_context,
-                    preedit,
-                    preedit_range,
-                    cursor_metrics,
-                );
-            }
-        }
-
         let mut draw_baseline = self.pos.y;
         for line_range in &lines {
             canvas.fill_text(
@@ -271,49 +253,10 @@ impl Drawable for Text {
 }
 
 impl Text {
-    fn draw_preedit_background(
-        &self,
-        canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
-        context: &TextDrawingContext<'_>,
-        preedit: &Preedit,
-        preedit_range: &Range<usize>,
-        cursor: CursorMetrics,
-    ) {
-        for span in &preedit.spans {
-            let Some(background_color) = span.background else {
-                continue;
-            };
-            let global_start = preedit_range.start + span.range.start;
-            let global_end = preedit_range.start + span.range.end;
-
-            for line in context.lines {
-                let overlap_start = global_start.max(line.range.start);
-                let overlap_end = global_end.min(line.range.end);
-                if overlap_start >= overlap_end {
-                    continue;
-                }
-                let segments =
-                    self.segments_for_line_span(canvas, context, line, overlap_start..overlap_end);
-                for (start_x, end_x) in segments {
-                    let width = (end_x - start_x).max(0.0);
-                    if width <= f32::EPSILON {
-                        continue;
-                    }
-                    let mut path = Path::new();
-                    let top = line.baseline + cursor.top_offset;
-                    path.rect(start_x, top, width, cursor.height);
-                    let mut fill_paint = Paint::color(background_color.into());
-                    fill_paint.set_anti_alias(true);
-                    canvas.fill_path(&path, &fill_paint);
-                }
-            }
-        }
-    }
-
     fn draw_preedit_overlays(
         &self,
         canvas: &mut femtovg::Canvas<femtovg::renderer::OpenGl>,
-        font: FontId,
+        _font: FontId,
         context: &TextDrawingContext<'_>,
         preedit: &Preedit,
         preedit_range: &Range<usize>,
@@ -335,46 +278,13 @@ impl Text {
                     continue;
                 }
 
-                if let Some(color) = span.foreground {
-                    let mut overlay_paint: Paint = self.style.into();
-                    overlay_paint.set_font(&[font]);
-                    overlay_paint.set_color(color.into());
-                    for (start_x, end_x) in &segments {
-                        let width = (*end_x - *start_x).max(0.0);
-                        if width <= f32::EPSILON {
-                            continue;
-                        }
-                        canvas.save();
-                        canvas.scissor(
-                            *start_x,
-                            line.baseline + cursor.top_offset,
-                            width,
-                            cursor.height,
-                        );
-                        canvas.fill_text(
-                            self.pos.x,
-                            line.baseline,
-                            &context.text[line.range.clone()],
-                            &overlay_paint,
-                        )?;
-                        canvas.restore();
-                    }
-                }
-
-                if let Some(underline) = span.underline {
-                    let color = span
-                        .underline_color
-                        .or(span.foreground)
-                        .unwrap_or(self.style.color);
-                    self.draw_underline_segments(
-                        canvas,
-                        &segments,
-                        line.baseline + cursor.top_offset,
-                        cursor.height,
-                        underline,
-                        color,
-                    );
-                }
+                self.draw_underline_segments(
+                    canvas,
+                    &segments,
+                    line.baseline + cursor.top_offset,
+                    cursor.height,
+                    self.style.color,
+                );
             }
         }
 
@@ -387,7 +297,6 @@ impl Text {
         segments: &[(f32, f32)],
         line_top: f32,
         cursor_height: f32,
-        underline: Underline,
         color: crate::style::Color,
     ) {
         if segments.is_empty() {
@@ -404,26 +313,10 @@ impl Text {
             if end_x - start_x <= f32::EPSILON {
                 continue;
             }
-            match underline {
-                Underline::Double | Underline::DoubleLine => {
-                    let mut first = Path::new();
-                    first.move_to(start_x, base_y - thickness);
-                    first.line_to(end_x, base_y - thickness);
-                    canvas.stroke_path(&first, &paint);
-
-                    let mut second = Path::new();
-                    second.move_to(start_x, base_y + thickness * 0.5);
-                    second.line_to(end_x, base_y + thickness * 0.5);
-                    canvas.stroke_path(&second, &paint);
-                }
-                Underline::None => {}
-                _ => {
-                    let mut path = Path::new();
-                    path.move_to(start_x, base_y);
-                    path.line_to(end_x, base_y);
-                    canvas.stroke_path(&path, &paint);
-                }
-            }
+            let mut path = Path::new();
+            path.move_to(start_x, base_y);
+            path.line_to(end_x, base_y);
+            canvas.stroke_path(&path, &paint);
         }
     }
 
@@ -565,129 +458,21 @@ impl Text {
 }
 
 impl Preedit {
-    fn from_ime(text: String, cursor: Option<usize>, attrs: Option<AttrList>) -> Self {
-        let spans = build_preedit_spans(&text, attrs);
+    fn from_ime(text: String, cursor: Option<usize>) -> Self {
         Self {
+            spans: build_preedit_spans(&text),
             text,
             cursor,
-            spans,
         }
     }
 }
 
-#[allow(clippy::cast_possible_truncation)]
-fn pango_color_to_style(color: pango::Color, alpha: Option<u16>) -> crate::style::Color {
-    let to_u8 = |value: u16| -> u8 { (value / 257) as u8 };
-    let alpha = alpha.unwrap_or(u16::MAX);
-    crate::style::Color::new(
-        to_u8(color.red()),
-        to_u8(color.green()),
-        to_u8(color.blue()),
-        to_u8(alpha),
-    )
-}
-
-fn clamp_index(index: i32, len: usize) -> usize {
-    if index < 0 {
-        0
+fn build_preedit_spans(text: &str) -> Vec<PreeditSpan> {
+    if text.is_empty() {
+        Vec::new()
     } else {
-        (index as usize).min(len)
+        vec![PreeditSpan { range: 0..text.len() }]
     }
-}
-
-fn build_preedit_spans(text: &str, attrs: Option<AttrList>) -> Vec<PreeditSpan> {
-    let mut spans = Vec::new();
-    let text_len = text.len();
-
-    if let Some(attr_list) = attrs {
-        let mut iterator = attr_list.iterator();
-        loop {
-            let (start, end) = iterator.range();
-            let span_start = clamp_index(start, text_len);
-            let span_end = clamp_index(end, text_len);
-            if span_start < span_end {
-                let mut fg_color: Option<pango::Color> = None;
-                let mut bg_color: Option<pango::Color> = None;
-                let mut underline_color: Option<pango::Color> = None;
-                let mut underline: Option<Underline> = None;
-                let mut fg_alpha: Option<u16> = None;
-                let mut bg_alpha: Option<u16> = None;
-
-                for attr in iterator.attrs() {
-                    match attr.attr_class().type_() {
-                        AttrType::Foreground => {
-                            if let Some(color_attr) = attr.downcast_ref::<AttrColor>() {
-                                fg_color = Some(color_attr.color());
-                            }
-                        }
-                        AttrType::Background => {
-                            if let Some(color_attr) = attr.downcast_ref::<AttrColor>() {
-                                bg_color = Some(color_attr.color());
-                            }
-                        }
-                        AttrType::Underline => {
-                            if let Some(value_attr) = attr.downcast_ref::<AttrInt>() {
-                                underline =
-                                    Some(unsafe { Underline::from_glib(value_attr.value()) });
-                            }
-                        }
-                        AttrType::UnderlineColor => {
-                            if let Some(color_attr) = attr.downcast_ref::<AttrColor>() {
-                                underline_color = Some(color_attr.color());
-                            }
-                        }
-                        AttrType::ForegroundAlpha => {
-                            if let Some(alpha_attr) = attr.downcast_ref::<AttrInt>() {
-                                fg_alpha =
-                                    Some(alpha_attr.value().clamp(0, u16::MAX as i32) as u16);
-                            }
-                        }
-                        AttrType::BackgroundAlpha => {
-                            if let Some(alpha_attr) = attr.downcast_ref::<AttrInt>() {
-                                bg_alpha =
-                                    Some(alpha_attr.value().clamp(0, u16::MAX as i32) as u16);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                let mut span = PreeditSpan {
-                    range: span_start..span_end,
-                    ..Default::default()
-                };
-
-                if let Some(color) = fg_color {
-                    span.foreground = Some(pango_color_to_style(color, fg_alpha));
-                }
-                if let Some(color) = bg_color {
-                    span.background = Some(pango_color_to_style(color, bg_alpha));
-                }
-                if let Some(color) = underline_color {
-                    span.underline_color = Some(pango_color_to_style(color, None));
-                }
-                if let Some(value) = underline {
-                    span.underline = Some(value);
-                }
-
-                spans.push(span);
-            }
-
-            if !iterator.next_style_change() {
-                break;
-            }
-        }
-    }
-
-    if spans.is_empty() && !text.is_empty() {
-        spans.push(PreeditSpan {
-            range: 0..text_len,
-            underline: Some(Underline::Single),
-            ..Default::default()
-        });
-    }
-
-    spans
 }
 
 #[derive(Default)]
@@ -743,11 +528,7 @@ impl Tool for TextTool {
                     t.text_buffer.insert_at_cursor(&text);
                     ToolUpdateResult::Redraw
                 }
-                TextEventMsg::Preedit {
-                    text,
-                    attrs,
-                    cursor,
-                } => {
+                TextEventMsg::Preedit { text, cursor } => {
                     let cursor = cursor.map(|value| value as usize);
                     if text.is_empty() {
                         if t.preedit.take().is_some() {
@@ -756,7 +537,7 @@ impl Tool for TextTool {
                             ToolUpdateResult::Unmodified
                         }
                     } else {
-                        t.preedit = Some(Preedit::from_ime(text, cursor, attrs));
+                        t.preedit = Some(Preedit::from_ime(text, cursor));
                         ToolUpdateResult::Redraw
                     }
                 }
